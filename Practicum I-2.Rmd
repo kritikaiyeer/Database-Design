@@ -1,0 +1,417 @@
+---
+title: "Practicum I"
+output: html_notebook
+---
+
+Authors:
+
+Krithika Iyer iyer.kr@northeastern.edu
+
+Nisha Mishra mishra.ni@northeastern.edu
+
+ Load required libraries
+
+```{r}
+library(readr)
+library(sqldf)
+require(RMySQL)
+library(ggplot2)
+
+```
+
+
+ Set up and connect to mysql database
+
+
+```{r}
+
+# Settings
+db_user <- 'root'
+db_password <- 'password'
+db_name <- 'BirdStrikes'
+db_host <- 'localhost' # Workbench Host
+db_port <- 3306
+
+# 3. Read data from db
+mydb <-  dbConnect(RMySQL::MySQL(), user = db_user, password = db_password,
+                 dbname = db_name, host = db_host, port = db_port)
+
+```
+
+// Creating the look up tables airline and airports and load data from csv to mysql table.
+
+
+1. Creating airline table
+
+```{sql connection=mydb}
+CREATE TABLE airline(
+aid int PRIMARY KEY NOT NULL,
+code VARCHAR(100),
+airline VARCHAR(100) NOT NULL
+)
+
+```
+
+
+2. Creating airports table
+
+```{sql connection=mydb}
+CREATE TABLE airports(
+pid int PRIMARY KEY NOT NULL,
+code VARCHAR(100),
+name VARCHAR(100) NOT NULL,
+city VARCHAR(100) NOT NULL,
+state VARCHAR(100) NOT NULL,
+country VARCHAR(100) NOT NULL
+)
+```
+
+
+3. Extract data from BirdStrikes.csv to dataframe
+
+```{r}
+
+fn = "BirdStrikesData.csv"
+
+df.raw <- read.csv(file = fn,
+                   header = T,
+                   stringsAsFactors = F)
+
+```
+
+4. Inspect the dataframe and replace the missing values with "unknown"
+
+```{r}
+df.raw <- replace(df.raw, df.raw == "","unknown")
+
+head(df.raw, 6)
+```
+
+5. Extract airline name from the dataframe and store it in another dataframe
+
+```{r}
+n.airlines <- nrow(df.raw)
+df.airlines <- data.frame(aid = seq(1,n.airlines),
+                         code = "default",
+                         airline = df.raw$Aircraft..Airline.Operator
+                         )
+
+```
+
+6. Since we are developing an airline lookup table we will drop the duplicate airlines from the dataframe.
+
+```{r}
+df.airlines <- df.airlines[!duplicated(df.airlines$airline), ]
+rownames(df.airlines) <- NULL
+df.airlines
+```
+DB enable write permission
+
+```{r}
+dbExecute(mydb,"SET GLOBAL local_infile = 'ON'")
+
+
+```
+
+
+
+7. Bulk load the data into sql table
+
+```{r}
+dbWriteTable(mydb, "airline", df.airlines, overwrite = T)
+
+```
+
+8. Remove the row_names field from the table as it is not required.
+
+```{sql connection=mydb}
+ALTER TABLE airline
+DROP COLUMN row_names;
+
+```
+
+9. Since the table is overwritten we need to add primary key constraint again.
+
+```{sql connection=mydb}
+ALTER TABLE airline
+ADD CONSTRAINT PK_airline PRIMARY KEY (aid);
+```
+
+10. Add unknown to the look up table to point null values.
+
+```{sql connection=mydb}
+INSERT INTO airline (aid, code, airline) VALUES (0,"default", "unknown")
+
+
+```
+
+11. Extract airport name, state from the dataframe df.raw and store it in another dataframe
+
+```{r}
+n.airports <- nrow(df.raw)
+df.airports <- data.frame(pid = seq(1,n.airlines),
+code = "default",
+name = df.raw$Airport..Name,
+city = "default",
+state = df.raw$Origin.State,
+country = "USA"
+)
+```
+
+12. Remove duplicate airports from the dataframe.
+
+```{r}
+df.airports <- df.airports[!duplicated(df.airports$name),]
+df.airports
+```
+
+13. Bulk load the data into airports sql table
+
+```{r}
+dbWriteTable(mydb, "airports", df.airports, overwrite = T)
+
+```
+
+14. Remove the row_names field from the table as it is not required.
+
+```{sql connection=mydb}
+ALTER TABLE airports
+DROP COLUMN row_names;
+
+```
+
+15.Since the table is overwritten we need to add primary key constraint again.
+
+```{sql connection=mydb}
+ALTER TABLE airports
+ADD CONSTRAINT PK_airports PRIMARY KEY (pid);
+
+```
+
+
+16. Add unknown to the look up table to reference null values.
+
+```{sql connection=mydb}
+INSERT INTO airports(pid,code,name, city, state, country) VALUES (0,"default", "unknown","default","default","USA")
+
+
+```
+
+17. Find the Distinct Flight phase in birdstrikes.csv.
+
+```{r}
+df.flightStatus <- df.raw[!duplicated(df.raw$When..Phase.of.flight), ]
+df.flightStatus$When..Phase.of.flight
+
+```
+
+18. Update the dataframe by categorising the flight phases into 4 categories: take off, inflight, landing and unknown.
+
+```{r}
+df.raw$When..Phase.of.flight[df.raw$When..Phase.of.flight == "Climb"] <- "inflight"
+df.raw$When..Phase.of.flight[df.raw$When..Phase.of.flight == "Take-off run"] <- "takeOff"
+df.raw$When..Phase.of.flight[df.raw$When..Phase.of.flight == "Approach"] <- "inflight"
+df.raw$When..Phase.of.flight[df.raw$When..Phase.of.flight == "Descent"] <- "inflight"
+df.raw$When..Phase.of.flight[df.raw$When..Phase.of.flight == "Landing Roll"] <- "landing"
+df.raw$When..Phase.of.flight[df.raw$When..Phase.of.flight == "Taxi"] <- "unknown"
+df.raw$When..Phase.of.flight[df.raw$When..Phase.of.flight == "Parked"] <- "unknown"
+df.raw$When..Phase.of.flight[df.raw$When..Phase.of.flight == ""] <- "unknown"
+
+```
+
+19. Creating incident table
+
+```{sql connection=mydb}
+CREATE TABLE incident (
+iid int PRIMARY KEY NOT NULL,
+incidentDate DATE NOT NULL,
+depPort bigint NOT NULL,
+arrPort bigint NOT NULL,
+airline bigint NOT NULL,
+aircraft VARCHAR(100) NOT NULL,
+flightPhase TEXT NOT NULL,
+impact VARCHAR(100) NOT NULL,
+FOREIGN KEY(depPort) REFERENCES airports(pid) ON DELETE CASCADE,
+FOREIGN KEY(arrPort) REFERENCES airports(pid) ON DELETE CASCADE,
+FOREIGN KEY(airline) REFERENCES airline(aid) ON DELETE CASCADE
+);
+
+```
+
+
+20. Extract impact, aircraft, recordid from dataframe and store it another dataframe.
+
+(Pls check if the dataframe has similar coloumn name as mentioned below if the code throws error)
+
+```{r}
+n.incidents <- nrow(df.raw)
+df.incidents <- data.frame(iid = df.raw$ï..Record.ID,
+                           incidentDate = as.Date(df.raw$FlightDate, format = "%m/%d/%Y"),
+                           flightPhase = df.raw$When..Phase.of.flight,
+                           impact = df.raw$Effect..Impact.to.flight,
+                           aircraft = df.raw$Aircraft..Make.Model,
+                           depPort = 1,
+                           arrPort = 1,
+                           airline = 1)
+```
+
+21. Link foreign keys and primary keys to respective tables. Here depPort and arrPort will be linked to pid of airport and airline will be linked to aid of airline tabe.
+
+```{r}
+for (r in 1:n.incidents) {
+  # find the airline PK for that flight in the airlines table
+ 
+  a <- df.airports$pid[which(df.airports$name == df.raw$Airport..Name[r])]
+  df.incidents$depPort[r] <- a
+  b <- df.airports$pid[which(df.airports$name == df.raw$Airport..Name[r])]
+  df.incidents$arrPort[r] <- b
+  c <- df.airlines$aid[which(df.airlines$airline == df.raw$Aircraft..Airline.Operator[r])]
+  df.incidents$airline[r] <- c
+  
+}
+```
+
+
+22. Write to database,
+
+```{r}
+dbWriteTable(mydb, "incident", df.incidents, overwrite = T)
+```
+
+23. Remove the row_names col as it is not required
+
+```{sql connection=mydb}
+ALTER TABLE incident DROP COLUMN row_names
+```
+
+
+
+24. Add primary key constraints.
+
+```{sql connection=mydb}
+ALTER TABLE incident 
+ADD CONSTRAINT PK_incident PRIMARY KEY (iid);
+
+```
+
+// View the three database.
+
+1. Airline look up table
+
+```{sql connection=mydb}
+SELECT * FROM airline
+
+```
+
+2. Airports look up table
+
+```{sql connection=mydb}
+SELECT * FROM airports
+
+```
+
+3. Incident table
+
+```{sql connection=mydb}
+SELECT * FROM incident 
+```
+
+
+// find the number of bird strike incidents for each airline arriving at LaGuardia airport during any phase of landing.
+
+```{sql connection=mydb}
+SELECT airline.airline, COUNT(iid) FROM incident
+JOIN airports
+ON incident.arrPort = airports.pid
+JOIN airline
+ON incident.airline = airline.aid
+WHERE airports.name LIKE "%LaGuardia%"
+AND incident.flightPhase = "landing"
+GROUP BY airline.airline
+
+```
+
+// find the airport that had the most bird strike incidents (during any flight phase). Include all commercial airlines, i.e., no business, private, or military flights. 
+
+```{sql connection=mydb}
+select airport_name from
+(SELECT airports.name as airport_name, COUNT(iid) FROM incident
+JOIN airports
+ON incident.arrPort = airports.pid
+JOIN airline
+ON incident.airline = airline.aid
+WHERE airline.airline not like '%BUSINESS%'
+OR airline.airline not like '%MILITARY%' 
+OR airline.airline not like '%PRIVATE%' GROUP BY airports.name order by count(iid) desc LIMIT 1) as a
+
+```
+
+//  find the number of bird strike incidents by year. Include all airlines and all flights
+
+```{sql connection=mydb}
+SELECT YEAR(incidentDate), COUNT(iid) from incident group by YEAR(incidentDate);
+```
+
+
+
+// build a line chart that visualizes the number of bird strikes incidents per year from 2005 to 2011.
+
+```{r}
+df <- sqldf(drv="SQLite","SELECT strftime('%Y', incidentDate * 3600 * 24, 'unixepoch') year, COUNT(iid) from `df.incidents` WHERE year >= '2005' AND year <=   '2011'group by year")
+
+df
+
+```
+Use the ggplot function of R package ggplot2. 
+
+```{r}
+
+ggplot(data=df, aes(x=df$year, y=df$`COUNT(iid)`, group=1)) +
+  geom_line(color="red")+
+  geom_point()+
+  labs(title="Plot of Number of Birdstrike incidents between 2005 and 2011 (inclusive)",x="Year", y ="Number of Birdstrike Incidents" )
+
+```
+
+
+// a stored procedure in MySQL that removes a bird strike incident from the database when passed the iid.
+
+```{sql connection=mydb}
+CREATE PROCEDURE delete_incident ( in input_id int )
+BEGIN
+DELETE FROM incident
+WHERE iid=input_id;
+END
+
+```
+
+The iid which will be deleted
+
+```{sql connection=mydb}
+SELECT * FROM incident WHERE iid = 202152
+
+```
+
+
+Testing the procedure
+
+```{sql connection=mydb}
+CALL delete_incident (202152);
+
+```
+iid = 202152 deleted.
+
+```{sql connection=mydb}
+SELECT * FROM incident WHERE iid = 202152
+
+
+```
+
+
+Closing connection
+
+```{r}
+dbDisconnect(mydb)
+
+```
+
